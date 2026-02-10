@@ -1,195 +1,259 @@
 <template>
-  <div class="main" @dragenter.prevent @dragover.prevent @drop.prevent="onDrop">
+  <div
+    class="main"
+    @dragenter.prevent="onDragEnter"
+    @dragover.prevent
+    @dragleave.prevent="onDragLeave"
+    @drop.prevent="onDrop"
+  >
+    <div v-if="dragActive" class="drag-overlay">松开即可上传到当前目录</div>
+
     <progress
       v-if="uploadProgress !== null"
       :value="uploadProgress"
       max="100"
     ></progress>
+
     <UploadPopup
       v-model="showUploadPopup"
       @upload="onUploadClicked"
       @createFolder="createFolder"
     ></UploadPopup>
-    <button class="upload-button circle" @click="showUploadPopup = true">
-      <img
-        style="filter: invert(100%)"
-        src="https://cdnjs.cloudflare.com/ajax/libs/material-design-icons/4.0.0/png/file/upload_file/materialicons/36dp/2x/baseline_upload_file_black_36dp.png"
-        alt="Upload"
-        width="36"
-        height="36"
-        @contextmenu.prevent
-      />
-    </button>
-    <div class="app-bar">
-      <input type="search" v-model="search" aria-label="Search" />
-      <div class="menu-button">
-        <button class="circle" @click="showMenu = true">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 448 512"
-            width="24"
-            height="24"
-            title="Menu"
-            style="display: block; margin: 4px"
-          >
-            <!--! Font Awesome Pro 6.2.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license (Commercial License) Copyright 2022 Fonticons, Inc. -->
-            <path
-              d="M120 256c0 30.9-25.1 56-56 56s-56-25.1-56-56s25.1-56 56-56s56 25.1 56 56zm160 0c0 30.9-25.1 56-56 56s-56-25.1-56-56s25.1-56 56-56s56 25.1 56 56zm104 56c-30.9 0-56-25.1-56-56s25.1-56 56-56s56 25.1 56 56s-25.1 56-56 56z"
-            />
-          </svg>
-        </button>
-        <Menu
-          v-model="showMenu"
-          :items="[{ text: '名称A-Z' }, { text: '大小↑' } ,{ text: '大小↓' }, { text: '粘贴' }]"
-          @click="onMenuClick"
-        />
+
+    <header class="app-bar">
+      <div class="bar-title-wrap">
+        <strong class="bar-title">Cloudflare R2 文件库</strong>
+        <div class="path-line">
+          <button class="path-chip" @click="navigateTo('')">根目录</button>
+          <template v-for="(segment, idx) in cwdSegments" :key="segment + idx">
+            <span class="path-sep">/</span>
+            <button class="path-chip" @click="navigateToByIndex(idx)">
+              {{ segment }}
+            </button>
+          </template>
+        </div>
       </div>
-    </div>
+
+      <div class="app-tools">
+        <div class="search-wrap">
+          <input
+            type="search"
+            v-model.trim="search"
+            placeholder="搜索文件或目录"
+            aria-label="搜索"
+          />
+        </div>
+
+        <button class="tool-btn" title="刷新" @click="fetchFiles(true)">
+          刷新
+        </button>
+
+        <div class="menu-button">
+          <button class="tool-btn" title="排序和操作" @click="showMenu = true">
+            菜单
+          </button>
+          <Menu v-model="showMenu" :items="menuItems" @click="onMenuClick" />
+        </div>
+      </div>
+    </header>
+
+    <section class="status-row">
+      <span>目录: <code>{{ displayCwd }}</code></span>
+      <span>
+        {{ filteredFolders.length }} 个目录 · {{ filteredFiles.length }} 个文件
+      </span>
+      <span v-if="clipboard">已复制: {{ clipboard.split('/').pop() }}</span>
+      <span v-if="isUploading">
+        上传中: {{ currentUploadingFile || '准备中...' }}
+        <template v-if="uploadQueue.length">(队列 {{ uploadQueue.length }})</template>
+      </span>
+    </section>
+
+    <section v-if="selectedKeys.length" class="batch-bar">
+      <span>已选择 {{ selectedKeys.length }} 个文件</span>
+      <div class="batch-actions">
+        <button class="inline-action" @click="selectAllVisible">全选当前列表</button>
+        <button class="inline-action" @click="clearSelection">清空选择</button>
+        <button class="inline-action" @click="batchCopy">批量复制</button>
+        <button class="inline-action" @click="batchMove">批量移动</button>
+        <button class="inline-action danger" @click="batchDelete">批量删除</button>
+      </div>
+    </section>
+
     <ul class="file-list">
       <li v-if="cwd !== ''">
-        <div
-          tabindex="0"
-          class="file-item"
-          @click="cwd = cwd.replace(/[^\/]+\/$/, '')"
+        <button
+          type="button"
+          class="file-item file-item-folder"
+          @click="navigateUp"
           @contextmenu.prevent
         >
-          <div class="file-icon">
-            <img
-              src="https://cdnjs.cloudflare.com/ajax/libs/material-design-icons/4.0.0/png/file/folder/materialicons/36dp/2x/baseline_folder_black_36dp.png"
-              width="36"
-              height="36"
-              alt="Folder"
-            />
-          </div>
+          <div class="file-icon folder-icon">📁</div>
           <span class="file-name">..</span>
-        </div>
+        </button>
       </li>
+
       <li v-for="folder in filteredFolders" :key="folder">
         <div
-          tabindex="0"
-          class="file-item"
-          @click="cwd = folder"
-          @contextmenu.prevent="
-            showContextMenu = true;
-            focusedItem = folder;
-          "
+          class="file-item file-item-folder"
+          @click="navigateTo(folder)"
+          @contextmenu.prevent="openContextMenu(folder)"
         >
-          <div class="file-icon">
-            <img
-              src="https://cdnjs.cloudflare.com/ajax/libs/material-design-icons/4.0.0/png/file/folder/materialicons/36dp/2x/baseline_folder_black_36dp.png"
-              width="36"
-              height="36"
-              alt="Folder"
-            />
-          </div>
-          <span
-            class="file-name"
-            v-text="folder.match(/.*?([^/]*)\/?$/)[1]"
-          ></span>
-          <div style="margin-right: 10px;margin-left: auto;"
-            @click.stop="
-              showContextMenu = true;
-              focusedItem = folder;
-            "
-            >
-              <svg viewBox="0 0 24 24" style="height: 30px; width: 30px;"><path fill="currentColor" d="M10.5,12A1.5,1.5 0 0,1 12,10.5A1.5,1.5 0 0,1 13.5,12A1.5,1.5 0 0,1 12,13.5A1.5,1.5 0 0,1 10.5,12M10.5,16.5A1.5,1.5 0 0,1 12,15A1.5,1.5 0 0,1 13.5,16.5A1.5,1.5 0 0,1 12,18A1.5,1.5 0 0,1 10.5,16.5M10.5,7.5A1.5,1.5 0 0,1 12,6A1.5,1.5 0 0,1 13.5,7.5A1.5,1.5 0 0,1 12,9A1.5,1.5 0 0,1 10.5,7.5M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20A8,8 0 0,0 20,12A8,8 0 0,0 12,4Z"></path></svg>
-          </div>
+          <div class="file-icon folder-icon">📁</div>
+          <span class="file-name">{{ folderName(folder) }}</span>
+          <button class="item-action" @click.stop="openContextMenu(folder)">···</button>
         </div>
       </li>
+
       <li v-for="file in filteredFiles" :key="file.key">
         <div
-          @click="preview(`/raw/${file.key}`)"
-          @contextmenu.prevent="
-            showContextMenu = true;
-            focusedItem = file;
-          "
+          class="file-item"
+          @click="previewFile(file)"
+          @contextmenu.prevent="openContextMenu(file)"
         >
-          <div class="file-item">
-            <MimeIcon
-              :content-type="file.httpMetadata.contentType"
-              :thumbnail="
-                file.customMetadata.thumbnail
-                  ? `/raw/_$flaredrive$/thumbnails/${file.customMetadata.thumbnail}.png`
-                  : null
-              "
-            />
-            <div>
-              <div class="file-name" v-text="file.key.split('/').pop()"></div>
-              <div class="file-attr">
-                <span v-text="new Date(file.uploaded).toLocaleString()"></span>
-                <span v-text="formatSize(file.size)"></span>
-              </div>
-            </div>
-            <div style="margin-right: 10px;margin-left: auto;"
-            @click.stop="
-              showContextMenu = true;
-              focusedItem = file;
+          <input
+            class="select-box"
+            type="checkbox"
+            :checked="isSelected(file.key)"
+            @click.stop
+            @change="toggleSelected(file.key)"
+            :aria-label="`选择 ${file.key}`"
+          />
+          <MimeIcon
+            :content-type="file.httpMetadata?.contentType || ''"
+            :thumbnail="
+              file.customMetadata?.thumbnail
+                ? `/raw/_$flaredrive$/thumbnails/${file.customMetadata.thumbnail}.png`
+                : null
             "
-            >
-              <svg viewBox="0 0 24 24" style="height: 30px; width: 30px;"><path fill="currentColor" d="M10.5,12A1.5,1.5 0 0,1 12,10.5A1.5,1.5 0 0,1 13.5,12A1.5,1.5 0 0,1 12,13.5A1.5,1.5 0 0,1 10.5,12M10.5,16.5A1.5,1.5 0 0,1 12,15A1.5,1.5 0 0,1 13.5,16.5A1.5,1.5 0 0,1 12,18A1.5,1.5 0 0,1 10.5,16.5M10.5,7.5A1.5,1.5 0 0,1 12,6A1.5,1.5 0 0,1 13.5,7.5A1.5,1.5 0 0,1 12,9A1.5,1.5 0 0,1 10.5,7.5M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20A8,8 0 0,0 20,12A8,8 0 0,0 12,4Z"></path></svg>
+          />
+          <div class="file-content">
+            <div class="file-name">{{ file.key.split('/').pop() }}</div>
+            <div class="file-attr">
+              <span>{{ new Date(file.uploaded).toLocaleString() }}</span>
+              <span>{{ formatSize(file.size) }}</span>
+              <span>{{ file.httpMetadata?.contentType || 'unknown' }}</span>
             </div>
           </div>
+          <button class="item-action" @click.stop="openContextMenu(file)">···</button>
         </div>
       </li>
     </ul>
-    <div v-if="loading" style="margin-top: 12px; text-align: center">
-      <span>加载中...</span>
+
+    <div v-if="loading" class="page-tip">加载中...</div>
+    <div v-else-if="fetchError" class="page-tip error-tip">
+      <span>{{ fetchError }}</span>
+      <button class="inline-action" @click="fetchFiles(true)">重试</button>
     </div>
-    <div
-      v-else-if="!filteredFiles.length && !filteredFolders.length"
-      style="margin-top: 12px; text-align: center"
-    >
-      <span>没有文件</span>
+    <div v-else-if="!filteredFiles.length && !filteredFolders.length" class="page-tip">
+      没有文件
     </div>
+
+    <Dialog v-model="showPreviewDialog">
+      <div class="preview-dialog" @click.stop>
+        <div class="preview-head">
+          <strong class="preview-name">{{ previewName }}</strong>
+          <div class="preview-actions">
+            <a
+              v-if="previewUrl"
+              class="inline-action"
+              :href="previewUrl"
+              target="_blank"
+              rel="noopener"
+            >
+              新窗口打开
+            </a>
+          </div>
+        </div>
+
+        <div class="preview-body">
+          <div v-if="previewLoading" class="page-tip">预览加载中...</div>
+          <div v-else-if="previewError" class="page-tip error-tip">{{ previewError }}</div>
+
+          <img
+            v-else-if="previewType === 'image'"
+            :src="previewUrl"
+            alt="image preview"
+            class="preview-media"
+          />
+
+          <video
+            v-else-if="previewType === 'video'"
+            :src="previewUrl"
+            controls
+            class="preview-media"
+          ></video>
+
+          <audio
+            v-else-if="previewType === 'audio'"
+            :src="previewUrl"
+            controls
+            class="preview-audio"
+          ></audio>
+
+          <iframe
+            v-else-if="previewType === 'pdf'"
+            :src="previewUrl"
+            class="preview-pdf"
+            title="pdf preview"
+          ></iframe>
+
+          <pre v-else-if="previewType === 'json'" class="preview-text">{{ previewContent }}</pre>
+          <pre v-else-if="previewType === 'markdown'" class="preview-text">{{ previewContent }}</pre>
+          <pre v-else-if="previewType === 'text'" class="preview-text">{{ previewContent }}</pre>
+
+          <div v-else class="page-tip">
+            暂不支持该格式内置预览，请使用“新窗口打开”。
+          </div>
+        </div>
+      </div>
+    </Dialog>
+
     <Dialog v-model="showContextMenu">
       <div
-        v-text="focusedItem.key || focusedItem"
+        v-text="focusedItem?.key || focusedItem || ''"
         class="contextmenu-filename"
         @click.stop.prevent
       ></div>
+
       <ul v-if="typeof focusedItem === 'string'" class="contextmenu-list">
         <li>
-          <button @click="copyLink(`/?p=${encodeURIComponent(focusedItem)}`)">
-            <span>复制链接</span>
-          </button>
+          <button @click="copyFolderLink(focusedItem)">复制链接</button>
         </li>
         <li>
-          <button
-            style="color: red"
-            @click="removeFile(focusedItem + '_$folder$')"
-          >
-            <span>删除</span>
-          </button>
+          <button style="color: #a10" @click="removeFolder(focusedItem)">删除目录</button>
         </li>
       </ul>
-      <ul v-else class="contextmenu-list">
+
+      <ul v-else-if="focusedItem" class="contextmenu-list">
         <li>
-          <button @click="renameFile(focusedItem.key)">
-            <span>重命名</span>
-          </button>
+          <button @click="renameFile(focusedItem.key)">重命名</button>
         </li>
         <li>
-          <a :href="`/raw/${focusedItem.key}`" target="_blank" download>
-            <span>下载</span>
-          </a>
+          <a :href="`/raw/${focusedItem.key}`" target="_blank" download>下载</a>
         </li>
         <li>
-          <button @click="clipboard = focusedItem.key">
-            <span>复制</span>
-          </button>
+          <button @click="copyFileKey(focusedItem.key)">复制</button>
         </li>
         <li>
-          <button @click="copyLink(`/raw/${focusedItem.key}`)">
-            <span>复制链接</span>
-          </button>
+          <button @click="copyLink(`/raw/${focusedItem.key}`)">复制链接</button>
         </li>
         <li>
-          <button style="color: red" @click="removeFile(focusedItem.key)">
-            <span>删除</span>
-          </button>
+          <button @click="previewFile(focusedItem)">预览</button>
+        </li>
+        <li>
+          <button style="color: #a10" @click="removeFile(focusedItem.key)">删除</button>
         </li>
       </ul>
     </Dialog>
+
+    <button class="upload-button circle" @click="showUploadPopup = true" title="上传文件">
+      上传
+    </button>
+
+    <Transition name="fade">
+      <div v-if="toast" class="toast" :class="`toast-${toastType}`">{{ toast }}</div>
+    </Transition>
   </div>
 </template>
 
@@ -205,6 +269,8 @@ import Menu from "./Menu.vue";
 import MimeIcon from "./MimeIcon.vue";
 import UploadPopup from "./UploadPopup.vue";
 
+const TEXT_PREVIEW_LIMIT = 2 * 1024 * 1024;
+
 export default {
   data: () => ({
     cwd: new URL(window.location).searchParams.get("p") || "",
@@ -213,39 +279,292 @@ export default {
     clipboard: null,
     focusedItem: null,
     loading: false,
-    order: null,
+    fetchError: "",
     search: "",
+    sortMode: "nameAsc",
     showContextMenu: false,
     showMenu: false,
     showUploadPopup: false,
     uploadProgress: null,
     uploadQueue: [],
+    isUploading: false,
+    currentUploadingFile: "",
+    dragDepth: 0,
+    dragActive: false,
+    toast: "",
+    toastType: "info",
+    toastTimer: null,
+    popstateHandler: null,
+    selectedKeys: [],
+    showPreviewDialog: false,
+    previewLoading: false,
+    previewType: "unsupported",
+    previewContent: "",
+    previewError: "",
+    previewUrl: "",
+    previewName: "",
   }),
 
   computed: {
-    filteredFiles() {
-      let files = this.files;
-      if (this.search) {
-        files = files.filter((file) =>
-          file.key.split("/").pop().includes(this.search)
-        );
-      }
-      return files;
+    displayCwd() {
+      return this.cwd || "/";
+    },
+
+    cwdSegments() {
+      if (!this.cwd) return [];
+      return this.cwd.split("/").filter(Boolean);
+    },
+
+    menuItems() {
+      return [
+        { text: "名称 A-Z" },
+        { text: "名称 Z-A" },
+        { text: "时间 新->旧" },
+        { text: "时间 旧->新" },
+        { text: "大小 小->大" },
+        { text: "大小 大->小" },
+        { text: "粘贴" },
+      ];
     },
 
     filteredFolders() {
+      const keyword = this.search.toLowerCase();
       let folders = this.folders;
-      if (this.search) {
-        folders = folders.filter((folder) => folder.includes(this.search));
+      if (keyword) {
+        folders = folders.filter((folder) =>
+          this.folderName(folder).toLowerCase().includes(keyword)
+        );
       }
-      return folders;
+      return [...folders].sort((a, b) =>
+        this.folderName(a).localeCompare(this.folderName(b), "zh-Hans-CN")
+      );
+    },
+
+    filteredFiles() {
+      const keyword = this.search.toLowerCase();
+      let files = this.files;
+      if (keyword) {
+        files = files.filter((file) =>
+          file.key.split("/").pop().toLowerCase().includes(keyword)
+        );
+      }
+      return [...files].sort((a, b) => this.compareFiles(a, b));
+    },
+
+    selectedFiles() {
+      const selectedSet = new Set(this.selectedKeys);
+      return this.files.filter((file) => selectedSet.has(file.key));
     },
   },
 
   methods: {
-    copyLink(link) {
+    folderName(folder) {
+      return folder.match(/.*?([^/]*)\/?$/)?.[1] || folder;
+    },
+
+    compareFiles(a, b) {
+      if (this.sortMode === "nameDesc") {
+        return b.key.localeCompare(a.key, "zh-Hans-CN");
+      }
+      if (this.sortMode === "timeDesc") {
+        return new Date(b.uploaded).valueOf() - new Date(a.uploaded).valueOf();
+      }
+      if (this.sortMode === "timeAsc") {
+        return new Date(a.uploaded).valueOf() - new Date(b.uploaded).valueOf();
+      }
+      if (this.sortMode === "sizeAsc") {
+        return a.size - b.size;
+      }
+      if (this.sortMode === "sizeDesc") {
+        return b.size - a.size;
+      }
+      return a.key.localeCompare(b.key, "zh-Hans-CN");
+    },
+
+    notify(message, type = "info") {
+      this.toast = message;
+      this.toastType = type;
+      if (this.toastTimer) clearTimeout(this.toastTimer);
+      this.toastTimer = setTimeout(() => {
+        this.toast = "";
+      }, 2200);
+    },
+
+    ensureAuthRedirect() {
+      fetch("/api/write/")
+        .then((value) => {
+          if (value.redirected) window.location.href = value.url;
+        })
+        .catch(() => {});
+    },
+
+    isSelected(key) {
+      return this.selectedKeys.includes(key);
+    },
+
+    toggleSelected(key) {
+      if (this.isSelected(key)) {
+        this.selectedKeys = this.selectedKeys.filter((item) => item !== key);
+      } else {
+        this.selectedKeys = [...this.selectedKeys, key];
+      }
+    },
+
+    selectAllVisible() {
+      this.selectedKeys = this.filteredFiles.map((file) => file.key);
+    },
+
+    clearSelection() {
+      this.selectedKeys = [];
+    },
+
+    async batchDelete() {
+      if (!this.selectedKeys.length) return;
+      if (!window.confirm(`确定批量删除 ${this.selectedKeys.length} 个文件吗？`)) return;
+
+      let success = 0;
+      for (const key of this.selectedKeys) {
+        try {
+          await axios.delete(`/api/write/items/${key}`);
+          success += 1;
+        } catch (error) {
+          this.ensureAuthRedirect();
+        }
+      }
+      this.notify(`批量删除完成: ${success}/${this.selectedKeys.length}`);
+      this.clearSelection();
+      await this.fetchFiles();
+    },
+
+    async batchCopy() {
+      if (!this.selectedKeys.length) return;
+      const targetInput = window.prompt("复制到目录(留空表示当前目录):", this.cwd || "");
+      if (targetInput === null) return;
+      const targetDir = this.normalizeTargetDir(targetInput);
+
+      let success = 0;
+      for (const key of this.selectedKeys) {
+        const name = key.split("/").pop();
+        try {
+          await this.copyPaste(key, `${targetDir}${name}`);
+          success += 1;
+        } catch (error) {
+          this.ensureAuthRedirect();
+        }
+      }
+      this.notify(`批量复制完成: ${success}/${this.selectedKeys.length}`);
+      await this.fetchFiles();
+    },
+
+    async batchMove() {
+      if (!this.selectedKeys.length) return;
+      const targetInput = window.prompt("移动到目录(留空表示当前目录):", this.cwd || "");
+      if (targetInput === null) return;
+      const targetDir = this.normalizeTargetDir(targetInput);
+
+      let success = 0;
+      for (const key of this.selectedKeys) {
+        const name = key.split("/").pop();
+        try {
+          await this.copyPaste(key, `${targetDir}${name}`);
+          await axios.delete(`/api/write/items/${key}`);
+          success += 1;
+        } catch (error) {
+          this.ensureAuthRedirect();
+        }
+      }
+      this.notify(`批量移动完成: ${success}/${this.selectedKeys.length}`);
+      this.clearSelection();
+      await this.fetchFiles();
+    },
+
+    normalizeTargetDir(value) {
+      const trimmed = value.trim().replace(/^\/+/, "");
+      if (!trimmed) return this.normalizeCwd(this.cwd);
+      return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
+    },
+
+    detectPreviewType(file) {
+      const contentType = (file.httpMetadata?.contentType || "").toLowerCase();
+      const lowerName = file.key.toLowerCase();
+
+      if (contentType.startsWith("image/")) return "image";
+      if (contentType.startsWith("video/")) return "video";
+      if (contentType.startsWith("audio/")) return "audio";
+      if (contentType === "application/pdf" || lowerName.endsWith(".pdf")) return "pdf";
+      if (contentType.includes("json") || lowerName.endsWith(".json")) return "json";
+      if (
+        lowerName.endsWith(".md") ||
+        lowerName.endsWith(".markdown") ||
+        contentType.includes("markdown")
+      ) {
+        return "markdown";
+      }
+      if (
+        contentType.startsWith("text/") ||
+        /\.(txt|log|csv|xml|html|css|js|ts|vue|yml|yaml|ini|conf|sh)$/i.test(lowerName)
+      ) {
+        return "text";
+      }
+      return "unsupported";
+    },
+
+    async previewFile(file) {
+      this.showContextMenu = false;
+      this.previewName = file.key.split("/").pop();
+      this.previewUrl = `/raw/${file.key}`;
+      this.previewType = this.detectPreviewType(file);
+      this.previewLoading = false;
+      this.previewContent = "";
+      this.previewError = "";
+      this.showPreviewDialog = true;
+
+      if (!["text", "json", "markdown"].includes(this.previewType)) return;
+      if (file.size > TEXT_PREVIEW_LIMIT) {
+        this.previewError = "文本文件超过 2MB，请使用新窗口打开。";
+        return;
+      }
+
+      this.previewLoading = true;
+      try {
+        const response = await fetch(this.previewUrl);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const text = await response.text();
+        if (this.previewType === "json") {
+          try {
+            this.previewContent = JSON.stringify(JSON.parse(text), null, 2);
+          } catch (error) {
+            this.previewContent = text;
+          }
+        } else {
+          this.previewContent = text;
+        }
+      } catch (error) {
+        this.previewError = "预览加载失败";
+      } finally {
+        this.previewLoading = false;
+      }
+    },
+
+    async copyLink(link) {
       const url = new URL(link, window.location.origin);
-      navigator.clipboard.writeText(url.toString());
+      try {
+        await navigator.clipboard.writeText(url.toString());
+        this.notify("链接已复制");
+      } catch (error) {
+        window.prompt("复制失败，请手动复制", url.toString());
+      }
+      this.showContextMenu = false;
+    },
+
+    copyFolderLink(folder) {
+      this.copyLink(`/?p=${encodeURIComponent(folder)}`);
+    },
+
+    copyFileKey(key) {
+      this.clipboard = key;
+      this.notify(`已复制文件: ${key.split("/").pop()}`);
+      this.showContextMenu = false;
     },
 
     async copyPaste(source, target) {
@@ -255,87 +574,109 @@ export default {
       });
     },
 
+    normalizeName(name) {
+      return name.replace(/^\/+|\/+$/g, "").trim();
+    },
+
     async createFolder() {
       try {
-        const folderName = window.prompt("请输入文件夹名称");
+        const folderName = this.normalizeName(window.prompt("请输入文件夹名称") || "");
         if (!folderName) return;
         this.showUploadPopup = false;
         const uploadUrl = `/api/write/items/${this.cwd}${folderName}/_$folder$`;
         await axios.put(uploadUrl, "");
-        this.fetchFiles();
+        await this.fetchFiles();
+        this.notify("目录创建成功");
       } catch (error) {
-        fetch("/api/write/")
-          .then((value) => {
-            if (value.redirected) window.location.href = value.url;
-          })
-          .catch(() => {});
-        console.log(`Create folder failed`);
+        this.ensureAuthRedirect();
+        this.notify("目录创建失败", "error");
       }
     },
 
-    fetchFiles() {
+    async fetchFiles(force = false) {
       this.files = [];
       this.folders = [];
+      this.fetchError = "";
       this.loading = true;
-      fetch(`/api/children/${this.cwd}`)
-        .then((res) => res.json())
-        .then((files) => {
-          this.files = files.value;
-          if (this.order) {
-            this.files.sort((a, b) => {
-              if (this.order === "size") {
-                return b.size - a.size;
-              }
-            });
-          }
-          this.folders = files.folders;
-          this.loading = false;
+      this.clearSelection();
+
+      try {
+        const response = await fetch(`/api/children/${this.cwd}`, {
+          cache: force ? "reload" : "default",
         });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const result = await response.json();
+        this.files = result.value || [];
+        this.folders = result.folders || [];
+      } catch (error) {
+        this.fetchError = "文件列表加载失败";
+      } finally {
+        this.loading = false;
+      }
     },
 
     formatSize(size) {
       const units = ["B", "KB", "MB", "GB", "TB"];
+      let value = size;
       let i = 0;
-      while (size >= 1024) {
-        size /= 1024;
-        i++;
+      while (value >= 1024 && i < units.length - 1) {
+        value /= 1024;
+        i += 1;
       }
-      return `${size.toFixed(1)} ${units[i]}`;
+      return `${value.toFixed(1)} ${units[i]}`;
+    },
+
+    onDragEnter() {
+      this.dragDepth += 1;
+      this.dragActive = true;
+    },
+
+    onDragLeave() {
+      this.dragDepth = Math.max(0, this.dragDepth - 1);
+      if (this.dragDepth === 0) this.dragActive = false;
     },
 
     onDrop(ev) {
+      this.dragDepth = 0;
+      this.dragActive = false;
       let files;
       if (ev.dataTransfer.items) {
         files = [...ev.dataTransfer.items]
           .filter((item) => item.kind === "file")
-          .map((item) => item.getAsFile());
-      } else files = ev.dataTransfer.files;
+          .map((item) => item.getAsFile())
+          .filter(Boolean);
+      } else {
+        files = ev.dataTransfer.files;
+      }
       this.uploadFiles(files);
     },
 
     onMenuClick(text) {
       switch (text) {
-        case "名称A-Z":
-          this.order = null;
-          break;
-        case "大小↑":
-          this.order = "大小↑";
-          break;
-        case "大小↓":
-          this.order = "大小↓";
-          break;
+        case "名称 A-Z":
+          this.sortMode = "nameAsc";
+          return;
+        case "名称 Z-A":
+          this.sortMode = "nameDesc";
+          return;
+        case "时间 新->旧":
+          this.sortMode = "timeDesc";
+          return;
+        case "时间 旧->新":
+          this.sortMode = "timeAsc";
+          return;
+        case "大小 小->大":
+          this.sortMode = "sizeAsc";
+          return;
+        case "大小 大->小":
+          this.sortMode = "sizeDesc";
+          return;
         case "粘贴":
-          return this.pasteFile();
+          this.pasteFile();
+          return;
+        default:
+          return;
       }
-      this.files.sort((a, b) => {
-        if (this.order === "大小↑") {
-          return a.size - b.size;
-        } else if (this.order === "大小↓") {
-          return b.size - a.size;
-        } else {
-          return a.key.localeCompare(b.key);
-        }
-      });
     },
 
     onUploadClicked(fileElement) {
@@ -345,103 +686,149 @@ export default {
       fileElement.value = null;
     },
 
-    preview(filePath){
-      window.open(filePath);
-    },
-
     async pasteFile() {
-      if (!this.clipboard) return;
-      let newName = window.prompt("Rename to:");
+      if (!this.clipboard) {
+        this.notify("剪贴板为空", "error");
+        return;
+      }
+      let newName = window.prompt("粘贴后文件名:");
       if (newName === null) return;
-      if (newName === "") newName = this.clipboard.split("/").pop();
-      await this.copyPaste(this.clipboard, `${this.cwd}${newName}`);
-      this.fetchFiles();
+      newName = this.normalizeName(newName);
+      if (!newName) newName = this.clipboard.split("/").pop();
+
+      try {
+        await this.copyPaste(this.clipboard, `${this.cwd}${newName}`);
+        await this.fetchFiles();
+        this.notify("粘贴完成");
+      } catch (error) {
+        this.ensureAuthRedirect();
+        this.notify("粘贴失败", "error");
+      }
     },
 
     async processUploadQueue() {
-      if (!this.uploadQueue.length) {
-        this.fetchFiles();
-        this.uploadProgress = null;
-        return;
-      }
+      if (this.isUploading) return;
+      if (!this.uploadQueue.length) return;
 
-      /** @type File **/
-      const { basedir, file } = this.uploadQueue.pop(0);
-      let thumbnailDigest = null;
-
-      if (file.type.startsWith("image/") || file.type === "video/mp4") {
-        try {
-          const thumbnailBlob = await generateThumbnail(file);
-          const digestHex = await blobDigest(thumbnailBlob);
-
-          const thumbnailUploadUrl = `/api/write/items/_$flaredrive$/thumbnails/${digestHex}.png`;
-          try {
-            await axios.put(thumbnailUploadUrl, thumbnailBlob);
-            thumbnailDigest = digestHex;
-          } catch (error) {
-            fetch("/api/write/")
-              .then((value) => {
-                if (value.redirected) window.location.href = value.url;
-              })
-              .catch(() => {});
-            console.log(`Upload ${digestHex}.png failed`);
-          }
-        } catch (error) {
-          console.log(`Generate thumbnail failed`);
-        }
-      }
+      this.isUploading = true;
+      this.uploadProgress = 0;
 
       try {
-        const uploadUrl = `/api/write/items/${basedir}${file.name}`;
-        const headers = {};
-        const onUploadProgress = (progressEvent) => {
-          var percentCompleted =
-            (progressEvent.loaded * 100) / progressEvent.total;
-          this.uploadProgress = percentCompleted;
-        };
-        if (thumbnailDigest) headers["fd-thumbnail"] = thumbnailDigest;
-        if (file.size >= SIZE_LIMIT) {
-          await multipartUpload(`${basedir}${file.name}`, file, {
-            headers,
-            onUploadProgress,
-          });
-        } else {
-          await axios.put(uploadUrl, file, { headers, onUploadProgress });
+        while (this.uploadQueue.length) {
+          const { basedir, file } = this.uploadQueue.shift();
+          this.currentUploadingFile = file.name;
+          let thumbnailDigest = null;
+
+          if (file.type.startsWith("image/") || file.type === "video/mp4") {
+            try {
+              const thumbnailBlob = await generateThumbnail(file);
+              const digestHex = await blobDigest(thumbnailBlob);
+              const thumbnailUploadUrl = `/api/write/items/_$flaredrive$/thumbnails/${digestHex}.png`;
+              await axios.put(thumbnailUploadUrl, thumbnailBlob);
+              thumbnailDigest = digestHex;
+            } catch (error) {
+              console.log("Generate or upload thumbnail failed", error);
+            }
+          }
+
+          const headers = {};
+          if (thumbnailDigest) headers["fd-thumbnail"] = thumbnailDigest;
+
+          const onUploadProgress = (progressEvent) => {
+            const percentCompleted = (progressEvent.loaded * 100) / progressEvent.total;
+            this.uploadProgress = Math.min(100, Math.round(percentCompleted));
+          };
+
+          try {
+            if (file.size >= SIZE_LIMIT) {
+              await multipartUpload(`${basedir}${file.name}`, file, {
+                headers,
+                onUploadProgress,
+              });
+            } else {
+              await axios.put(`/api/write/items/${basedir}${file.name}`, file, {
+                headers,
+                onUploadProgress,
+              });
+            }
+          } catch (error) {
+            this.ensureAuthRedirect();
+            this.notify(`上传失败: ${file.name}`, "error");
+          }
         }
-      } catch (error) {
-        fetch("/api/write/")
-          .then((value) => {
-            if (value.redirected) window.location.href = value.url;
-          })
-          .catch(() => {});
-        console.log(`Upload ${file.name} failed`, error);
+      } finally {
+        this.isUploading = false;
+        this.currentUploadingFile = "";
+        this.uploadProgress = null;
+        await this.fetchFiles();
       }
-      setTimeout(this.processUploadQueue);
     },
 
     async removeFile(key) {
       if (!window.confirm(`确定要删除 ${key} 吗？`)) return;
-      await axios.delete(`/api/write/items/${key}`);
-      this.fetchFiles();
+      try {
+        await axios.delete(`/api/write/items/${key}`);
+        await this.fetchFiles();
+        this.notify("删除成功");
+      } catch (error) {
+        this.ensureAuthRedirect();
+        this.notify("删除失败", "error");
+      } finally {
+        this.showContextMenu = false;
+      }
+    },
+
+    async removeFolder(folder) {
+      await this.removeFile(folder + "_$folder$");
     },
 
     async renameFile(key) {
-      const newName = window.prompt("重命名为:");
+      const newName = this.normalizeName(window.prompt("重命名为:") || "");
       if (!newName) return;
-      await this.copyPaste(key, `${this.cwd}${newName}`);
-      await axios.delete(`/api/write/items/${key}`);
-      this.fetchFiles();
+      try {
+        await this.copyPaste(key, `${this.cwd}${newName}`);
+        await axios.delete(`/api/write/items/${key}`);
+        await this.fetchFiles();
+        this.notify("重命名成功");
+      } catch (error) {
+        this.ensureAuthRedirect();
+        this.notify("重命名失败", "error");
+      } finally {
+        this.showContextMenu = false;
+      }
+    },
+
+    normalizeCwd(value) {
+      if (!value) return "";
+      return value.endsWith("/") ? value : `${value}/`;
     },
 
     uploadFiles(files) {
-      if (this.cwd && !this.cwd.endsWith("/")) this.cwd += "/";
+      if (!files || !files.length) return;
+      const basedir = this.normalizeCwd(this.cwd);
 
-      const uploadTasks = Array.from(files).map((file) => ({
-        basedir: this.cwd,
-        file,
-      }));
+      const uploadTasks = Array.from(files).map((file) => ({ basedir, file }));
       this.uploadQueue.push(...uploadTasks);
-      setTimeout(() => this.processUploadQueue());
+      this.notify(`已加入队列: ${uploadTasks.length} 个文件`);
+      this.processUploadQueue();
+    },
+
+    openContextMenu(item) {
+      this.focusedItem = item;
+      this.showContextMenu = true;
+    },
+
+    navigateUp() {
+      this.cwd = this.cwd.replace(/[^/]+\/$/, "");
+    },
+
+    navigateTo(path) {
+      this.cwd = path;
+    },
+
+    navigateToByIndex(index) {
+      const segments = this.cwdSegments.slice(0, index + 1);
+      this.cwd = `${segments.join("/")}/`;
     },
   },
 
@@ -451,25 +838,28 @@ export default {
         this.fetchFiles();
         const url = new URL(window.location);
         if ((url.searchParams.get("p") || "") !== this.cwd) {
-          this.cwd
-            ? url.searchParams.set("p", this.cwd)
-            : url.searchParams.delete("p");
+          this.cwd ? url.searchParams.set("p", this.cwd) : url.searchParams.delete("p");
           window.history.pushState(null, "", url.toString());
         }
-        document.title = `${
-          this.cwd.replace(/.*\/(?!$)|\//g, "") || "/"
-        } - 文件库`;
+        document.title = `${this.cwd.replace(/.*\/(?!$)|\//g, "") || "/"} - 文件库`;
       },
       immediate: true,
     },
   },
 
   created() {
-    window.addEventListener("popstate", (ev) => {
+    this.popstateHandler = () => {
       const searchParams = new URL(window.location).searchParams;
-      if (searchParams.get("p") !== this.cwd)
-        this.cwd = searchParams.get("p") || "";
-    });
+      if (searchParams.get("p") !== this.cwd) this.cwd = searchParams.get("p") || "";
+    };
+    window.addEventListener("popstate", this.popstateHandler);
+  },
+
+  unmounted() {
+    if (this.popstateHandler) {
+      window.removeEventListener("popstate", this.popstateHandler);
+    }
+    if (this.toastTimer) clearTimeout(this.toastTimer);
   },
 
   components: {
@@ -483,34 +873,332 @@ export default {
 
 <style>
 .main {
-  height: 100%;
+  min-height: 100%;
+  position: relative;
+  padding-bottom: 84px;
+}
+
+.drag-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: rgba(20, 120, 120, 0.2);
+  color: #0b4040;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  font-weight: 700;
+  backdrop-filter: blur(1px);
 }
 
 .app-bar {
   position: sticky;
   top: 0;
-  padding: 8px;
-  background-color: white;
+  z-index: 5;
   display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(17, 24, 39, 0.08);
+  background: rgba(250, 252, 255, 0.9);
+  backdrop-filter: blur(8px);
+}
+
+.bar-title-wrap {
+  min-width: 0;
+}
+
+.bar-title {
+  display: block;
+  font-size: 15px;
+  margin-bottom: 6px;
+}
+
+.path-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.path-chip {
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid rgba(12, 74, 110, 0.2);
+  background: rgba(255, 255, 255, 0.86);
+}
+
+.path-sep {
+  color: #6b7280;
+}
+
+.app-tools {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.search-wrap {
+  min-width: 180px;
 }
 
 .menu-button {
   display: flex;
   position: relative;
-  margin-left: 4px;
 }
 
-.menu-button > button {
-  transition: background-color 0.2s ease;
+.tool-btn,
+.inline-action,
+.item-action {
+  border: 1px solid rgba(17, 24, 39, 0.15);
+  border-radius: 10px;
+  background: #fff;
+  padding: 7px 10px;
+  cursor: pointer;
+  transition: all 0.2s ease;
 }
 
-.menu-button > button:hover {
-  background-color: whitesmoke;
+.tool-btn:hover,
+.inline-action:hover,
+.item-action:hover,
+.path-chip:hover {
+  background: #ecf7ff;
+  border-color: rgba(8, 97, 158, 0.35);
 }
 
-.menu {
-  position: absolute;
-  top: 100%;
-  right: 0;
+.status-row {
+  margin: 12px 16px 10px;
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  color: #46576d;
+  font-size: 13px;
+}
+
+.status-row code {
+  background: rgba(12, 74, 110, 0.08);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.batch-bar {
+  margin: 0 16px 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(14, 165, 164, 0.1);
+  border: 1px solid rgba(13, 148, 136, 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.batch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.danger {
+  border-color: rgba(161, 16, 16, 0.35);
+  color: #a10;
+}
+
+.file-item {
+  position: relative;
+}
+
+.select-box {
+  margin-left: 12px;
+  margin-right: 4px;
+}
+
+.file-content {
+  min-width: 0;
+}
+
+.file-item-folder {
+  width: 100%;
+  text-align: left;
+}
+
+.folder-icon {
+  font-size: 24px;
+}
+
+.item-action {
+  margin-left: auto;
+  padding: 6px 10px;
+  color: #4b5563;
+}
+
+.page-tip {
+  margin: 16px;
+  text-align: center;
+  color: #4b5563;
+}
+
+.error-tip {
+  color: #912121;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: center;
+}
+
+.preview-dialog {
+  width: min(88vw, 960px);
+  max-height: 80vh;
+  background: #fff;
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.preview-head {
+  padding: 12px;
+  border-bottom: 1px solid rgba(17, 24, 39, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.preview-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-body {
+  padding: 12px;
+  overflow: auto;
+}
+
+.preview-media {
+  max-width: 100%;
+  max-height: calc(80vh - 120px);
+  border-radius: 8px;
+}
+
+.preview-audio {
+  width: 100%;
+}
+
+.preview-pdf {
+  width: 100%;
+  min-height: 65vh;
+  border: 1px solid rgba(17, 24, 39, 0.15);
+  border-radius: 8px;
+}
+
+.preview-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+  font-size: 13px;
+  background: #f8fafc;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.contextmenu-filename {
+  padding: 12px;
+  min-width: 256px;
+  max-width: min(70vw, 500px);
+}
+
+.contextmenu-list > li > * {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  text-align: left;
+  transition: background-color 0.2s ease-in-out;
+  font-size: inherit;
+}
+
+.contextmenu-list > li > *:hover {
+  background-color: #eef6ff;
+}
+
+.upload-button {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  min-width: 58px;
+  height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  background: linear-gradient(130deg, #0ea5a4, #0d9488);
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 12px 24px rgba(13, 148, 136, 0.28);
+  border: none;
+}
+
+button.circle {
+  border-radius: 50%;
+}
+
+progress {
+  position: fixed;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: 5px;
+  z-index: 25;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 22px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  color: #fff;
+  background: rgba(17, 24, 39, 0.92);
+  z-index: 30;
+}
+
+.toast-error {
+  background: rgba(153, 27, 27, 0.94);
+}
+
+@media (max-width: 820px) {
+  .app-bar {
+    align-items: stretch;
+  }
+
+  .app-tools {
+    width: 100%;
+  }
+
+  .search-wrap {
+    flex: 1;
+  }
+
+  .tool-btn {
+    white-space: nowrap;
+  }
+
+  .status-row {
+    margin-top: 8px;
+    font-size: 12px;
+  }
+
+  .preview-dialog {
+    width: 94vw;
+  }
 }
 </style>
