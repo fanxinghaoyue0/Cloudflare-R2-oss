@@ -69,6 +69,44 @@
       </span>
     </section>
 
+    <section class="usage-card">
+      <div class="usage-head">
+        <strong>用量统计</strong>
+        <button class="inline-action" @click="fetchUsageStats(true)">刷新统计</button>
+      </div>
+      <div v-if="usageLoading" class="usage-loading">统计中...</div>
+      <div v-else-if="usageError" class="usage-error">{{ usageError }}</div>
+      <template v-else-if="usageStats">
+        <div class="usage-row">
+          <span>总占用</span>
+          <span>{{ formatSize(usageStats.totalBytes) }} / {{ formatSize(usageStats.quotaBytes) }}</span>
+        </div>
+        <div class="usage-progress">
+          <div
+            class="usage-progress-inner"
+            :class="{ warn: usagePercent >= 80, danger: usagePercent >= 95 }"
+            :style="{ width: `${Math.min(100, usagePercent)}%` }"
+          ></div>
+        </div>
+        <div class="usage-row">
+          <span>占比</span>
+          <span>{{ usagePercent.toFixed(1) }}%</span>
+        </div>
+        <div class="usage-row">
+          <span>计费周期</span>
+          <span>{{ usageStats.cycleStartDate }} 起</span>
+        </div>
+        <div class="usage-row">
+          <span>本周期新增</span>
+          <span>{{ formatSize(usageStats.cycleUploadBytes) }} · {{ usageStats.cycleUploadCount }} 个文件</span>
+        </div>
+        <div class="usage-row">
+          <span>总文件数</span>
+          <span>{{ usageStats.totalObjects }} 个</span>
+        </div>
+      </template>
+    </section>
+
     <section v-if="selectedKeys.length" class="batch-bar">
       <span>已选择 {{ selectedKeys.length }} 个文件</span>
       <div class="batch-actions">
@@ -303,6 +341,9 @@ export default {
     previewError: "",
     previewUrl: "",
     previewName: "",
+    usageLoading: false,
+    usageError: "",
+    usageStats: null,
   }),
 
   computed: {
@@ -355,6 +396,11 @@ export default {
       const selectedSet = new Set(this.selectedKeys);
       return this.files.filter((file) => selectedSet.has(file.key));
     },
+
+    usagePercent() {
+      if (!this.usageStats || !this.usageStats.quotaBytes) return 0;
+      return (this.usageStats.totalBytes / this.usageStats.quotaBytes) * 100;
+    },
   },
 
   methods: {
@@ -388,6 +434,22 @@ export default {
       this.toastTimer = setTimeout(() => {
         this.toast = "";
       }, 2200);
+    },
+
+    async fetchUsageStats(force = false) {
+      this.usageLoading = true;
+      this.usageError = "";
+      try {
+        const response = await fetch(`/api/stats/usage${force ? "?refresh=1" : ""}`, {
+          cache: force ? "reload" : "default",
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        this.usageStats = await response.json();
+      } catch (error) {
+        this.usageError = "用量统计加载失败";
+      } finally {
+        this.usageLoading = false;
+      }
     },
 
     ensureAuthRedirect() {
@@ -434,6 +496,7 @@ export default {
       this.notify(`批量删除完成: ${success}/${this.selectedKeys.length}`);
       this.clearSelection();
       await this.fetchFiles();
+      await this.fetchUsageStats();
     },
 
     async batchCopy() {
@@ -454,6 +517,7 @@ export default {
       }
       this.notify(`批量复制完成: ${success}/${this.selectedKeys.length}`);
       await this.fetchFiles();
+      await this.fetchUsageStats();
     },
 
     async batchMove() {
@@ -476,6 +540,7 @@ export default {
       this.notify(`批量移动完成: ${success}/${this.selectedKeys.length}`);
       this.clearSelection();
       await this.fetchFiles();
+      await this.fetchUsageStats();
     },
 
     normalizeTargetDir(value) {
@@ -586,6 +651,7 @@ export default {
         const uploadUrl = `/api/write/items/${this.cwd}${folderName}/_$folder$`;
         await axios.put(uploadUrl, "");
         await this.fetchFiles();
+        await this.fetchUsageStats();
         this.notify("目录创建成功");
       } catch (error) {
         this.ensureAuthRedirect();
@@ -761,6 +827,7 @@ export default {
         this.currentUploadingFile = "";
         this.uploadProgress = null;
         await this.fetchFiles();
+        await this.fetchUsageStats();
       }
     },
 
@@ -769,6 +836,7 @@ export default {
       try {
         await axios.delete(`/api/write/items/${key}`);
         await this.fetchFiles();
+        await this.fetchUsageStats();
         this.notify("删除成功");
       } catch (error) {
         this.ensureAuthRedirect();
@@ -789,6 +857,7 @@ export default {
         await this.copyPaste(key, `${this.cwd}${newName}`);
         await axios.delete(`/api/write/items/${key}`);
         await this.fetchFiles();
+        await this.fetchUsageStats();
         this.notify("重命名成功");
       } catch (error) {
         this.ensureAuthRedirect();
@@ -848,6 +917,7 @@ export default {
   },
 
   created() {
+    this.fetchUsageStats();
     this.popstateHandler = () => {
       const searchParams = new URL(window.location).searchParams;
       if (searchParams.get("p") !== this.cwd) this.cwd = searchParams.get("p") || "";
@@ -983,6 +1053,62 @@ export default {
   background: rgba(12, 74, 110, 0.08);
   border-radius: 4px;
   padding: 0 4px;
+}
+
+.usage-card {
+  margin: 0 16px 10px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(17, 24, 39, 0.12);
+  background: #fff;
+}
+
+.usage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.usage-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 13px;
+  color: #334155;
+}
+
+.usage-progress {
+  margin-top: 8px;
+  height: 10px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+
+.usage-progress-inner {
+  height: 100%;
+  background: linear-gradient(90deg, #14b8a6, #0d9488);
+  transition: width 0.2s ease;
+}
+
+.usage-progress-inner.warn {
+  background: linear-gradient(90deg, #f59e0b, #d97706);
+}
+
+.usage-progress-inner.danger {
+  background: linear-gradient(90deg, #ef4444, #b91c1c);
+}
+
+.usage-loading,
+.usage-error {
+  color: #475569;
+  font-size: 13px;
+}
+
+.usage-error {
+  color: #991b1b;
 }
 
 .batch-bar {
