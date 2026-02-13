@@ -260,6 +260,9 @@
           <button @click="copyFolderLink(focusedItem)">复制链接</button>
         </li>
         <li>
+          <button @click="downloadFolderAsZip(focusedItem)">打包下载</button>
+        </li>
+        <li>
           <button style="color: #a10" @click="removeFolder(focusedItem)">删除目录</button>
         </li>
       </ul>
@@ -515,7 +518,7 @@ export default {
       for (const key of this.selectedKeys) {
         const filename = key.split("/").pop() || key;
         try {
-          const response = await fetch(`/raw/${key}`);
+          const response = await fetch(`/raw/${this.encodeObjectPath(key)}`);
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const blob = await response.blob();
           zip.file(filename, blob);
@@ -543,6 +546,68 @@ export default {
         this.notify(`批量下载完成: ${success}/${this.selectedKeys.length}`);
       } catch (error) {
         this.notify("ZIP 生成失败", "error");
+      }
+    },
+
+    async downloadFolderAsZip(folder) {
+      if (!window.JSZip) {
+        this.notify("缺少 JSZip 依赖，无法打包下载", "error");
+        return;
+      }
+      this.showContextMenu = false;
+
+      const rootFolderName = this.folderName(folder) || "folder";
+      const zip = new window.JSZip();
+      const rootZipFolder = zip.folder(rootFolderName);
+      let success = 0;
+
+      this.notify(`正在打包目录: ${rootFolderName}`);
+
+      const collectFiles = async (prefix, zipFolder) => {
+        const path = prefix.endsWith("/") ? prefix.slice(0, -1) : prefix;
+        const encodedPath = this.encodeObjectPath(path);
+        const response = await fetch(`/api/children/${encodedPath}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+
+        for (const file of data.value || []) {
+          const rawResponse = await fetch(`/raw/${this.encodeObjectPath(file.key)}`);
+          if (!rawResponse.ok) continue;
+          const blob = await rawResponse.blob();
+          const fileName = file.key.split("/").pop() || file.key;
+          zipFolder.file(fileName, blob);
+          success += 1;
+        }
+
+        for (const subFolder of data.folders || []) {
+          const subName = this.folderName(subFolder) || "folder";
+          const childZipFolder = zipFolder.folder(subName);
+          await collectFiles(subFolder, childZipFolder);
+        }
+      };
+
+      try {
+        await collectFiles(folder, rootZipFolder);
+        if (!success) {
+          this.notify("目录中没有可下载文件", "error");
+          return;
+        }
+        const zipBlob = await zip.generateAsync({ type: "blob" });
+        const url = URL.createObjectURL(zipBlob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${rootFolderName}-${new Date()
+          .toISOString()
+          .slice(0, 19)
+          .replace(/[:T]/g, "-")}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        this.notify(`目录打包完成: ${success} 个文件`);
+      } catch (error) {
+        console.log("Folder zip download failed", error);
+        this.notify("目录打包下载失败", "error");
       }
     },
 
@@ -594,6 +659,14 @@ export default {
       const trimmed = value.trim().replace(/^\/+/, "");
       if (!trimmed) return this.normalizeCwd(this.cwd);
       return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
+    },
+
+    encodeObjectPath(path) {
+      return path
+        .split("/")
+        .filter((part) => part !== "")
+        .map((part) => encodeURIComponent(part))
+        .join("/");
     },
 
     detectPreviewType(file) {
