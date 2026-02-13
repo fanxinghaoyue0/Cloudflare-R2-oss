@@ -112,6 +112,7 @@
       <div class="batch-actions">
         <button class="inline-action" @click="selectAllVisible">全选当前列表</button>
         <button class="inline-action" @click="clearSelection">清空选择</button>
+        <button class="inline-action" @click="batchDownload">批量下载</button>
         <button class="inline-action" @click="batchCopy">批量复制</button>
         <button class="inline-action" @click="batchMove">批量移动</button>
         <button class="inline-action danger" @click="batchDelete">批量删除</button>
@@ -497,6 +498,52 @@ export default {
       this.clearSelection();
       await this.fetchFiles();
       await this.fetchUsageStats();
+    },
+
+    async batchDownload() {
+      if (!this.selectedKeys.length) return;
+      if (!window.JSZip) {
+        this.notify("缺少 JSZip 依赖，无法批量下载", "error");
+        return;
+      }
+
+      const zip = new window.JSZip();
+      let success = 0;
+
+      this.notify(`开始打包 ${this.selectedKeys.length} 个文件...`);
+
+      for (const key of this.selectedKeys) {
+        const filename = key.split("/").pop() || key;
+        try {
+          const response = await fetch(`/raw/${key}`);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const blob = await response.blob();
+          zip.file(filename, blob);
+          success += 1;
+        } catch (error) {
+          console.log("Batch download item failed", key, error);
+        }
+      }
+
+      if (!success) {
+        this.notify("批量下载失败：没有可打包的文件", "error");
+        return;
+      }
+
+      try {
+        const zipBlob = await zip.generateAsync({ type: "blob" });
+        const url = URL.createObjectURL(zipBlob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `download-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        this.notify(`批量下载完成: ${success}/${this.selectedKeys.length}`);
+      } catch (error) {
+        this.notify("ZIP 生成失败", "error");
+      }
     },
 
     async batchCopy() {
